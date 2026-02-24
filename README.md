@@ -17,20 +17,27 @@ can pivot to editing IaC instead.
 The hook implements an **allowlist** strategy:
 
 1. If the shell command contains no `aws` invocation → allow.
-2. Each `aws` invocation is extracted from compound commands (`&&`, `||`, `;`,
-   `|`), command substitutions (`$(aws ...)`, `` `aws ...` ``), and env-var
-   prefixed forms (`AWS_PROFILE=prod aws ...`).
-3. The service and subcommand are parsed (skipping global flags like
+2. Each `aws` invocation is extracted from:
+   - Compound commands (`&&`, `||`, `;`, `|`)
+   - Piped-to-aws patterns (`cat data.json | aws s3api put-object ...`)
+   - Command substitutions (`$(aws ...)`, `` `aws ...` ``)
+   - Env-var prefixed forms (`AWS_PROFILE=prod aws ...`)
+   - Heredoc bodies passed to a shell interpreter (`bash <<EOF\naws ...\nEOF`)
+   - Shell `-c` inline strings (`bash -c 'aws ...'`)
+   - AWS commands with heredoc stdin (`aws sqs send-message ... <<EOF`)
+3. Heredoc content written to files (not executed) is stripped before checking,
+   preventing false positives when a script file happens to mention `aws`.
+4. The service and subcommand are parsed (skipping global flags like
    `--region`, `--profile`).
-4. Always-allowed pairs pass immediately: all `aws sts *` commands,
+5. Always-allowed pairs pass immediately: all `aws sts *` commands,
    `aws configure get/list`, `aws s3 ls`, `aws s3 presign`,
    `aws s3 cp <s3://src> <local-dest>` (downloads only), `aws logs tail`.
-5. For everything else the subcommand must start with a recognised read-only
+6. For everything else the subcommand must start with a recognised read-only
    prefix: `get-`, `list-`, `describe-`, `query`, `search-`, `check-`,
    `validate-`, `scan`, `batch-get-`, `generate-presigned-`, `estimate-`,
    `preview-`, `export-`, `filter-`, `lookup-`, `calculate-`, `resolve-`,
    `summarize-`.
-6. Anything that does not match is **hard-blocked** (exit 2). Claude receives
+7. Anything that does not match is **hard-blocked** (exit 2). Claude receives
    the block message and is expected to identify the correct IaC change.
 
 There is **no override**. The block is absolute.
@@ -40,12 +47,43 @@ IaC deploy commands (`terraform apply`, `cdk deploy`, `pulumi up`, etc.) are
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.8+ **or** [uv](https://docs.astral.sh/uv/) (preferred — zero-latency startup)
 - No third-party dependencies (stdlib only)
+
+The script has a `uv`-compatible PEP 723 shebang, so `uv run hooks/aws_guard.py`
+works with no virtualenv setup.
 
 ## Installation
 
-### Option A — project-level (this repo already configured)
+### Option A — Claude Code plugin (recommended)
+
+This repo ships as a Claude Code plugin. Install it via the plugin system:
+
+```shell
+# Add a marketplace pointing at this repo (one-time setup)
+/plugin marketplace add <repo-url>
+
+# Install the plugin — hook is registered automatically
+/plugin install aws-guard
+```
+
+The plugin manifest is at `.claude-plugin/plugin.json` and the hook
+definition is at `hooks/hooks.json`.
+
+### Option B — user-level install (all projects on this machine)
+
+Run the included install script. It copies the hook to `~/.claude/hooks/`
+and merges the configuration into `~/.claude/settings.json`:
+
+```bash
+./install.sh
+```
+
+The hook then applies to every Claude Code project you open, not just this
+repo.  To uninstall, remove the corresponding entry from
+`~/.claude/settings.json`.
+
+### Option C — project-level (this repo already configured)
 
 The `.claude/settings.json` in this repository already registers the hook.
 Clone the repo and open it with Claude Code:
@@ -56,7 +94,7 @@ cd my-project
 claude  # hook is active immediately
 ```
 
-### Option B — add to an existing project
+### Option D — add to an existing project manually
 
 1. Copy `hooks/aws_guard.py` into your project's `hooks/` directory.
 
@@ -71,7 +109,7 @@ claude  # hook is active immediately
         "hooks": [
           {
             "type": "command",
-            "command": "python3 hooks/aws_guard.py"
+            "command": "uv run hooks/aws_guard.py"
           }
         ]
       }
@@ -79,6 +117,8 @@ claude  # hook is active immediately
   }
 }
 ```
+
+Use `python3 hooks/aws_guard.py` if `uv` is not available.
 
 3. Verify the hook format against the current
    [Claude Code hooks documentation](https://docs.anthropic.com/en/docs/claude-code/hooks)
@@ -106,9 +146,10 @@ Blocked command: aws ec2 run-instances --image-id ami-12345678 --instance-type t
 python3 hooks/test_aws_guard.py
 ```
 
-91 tests cover: read-only allows, write blocks, compound commands, pipelines,
-command substitutions, `aws s3 cp` direction detection, and global-flag
-parsing.
+116 tests cover: read-only allows, write blocks, compound commands, pipelines,
+piped-to-aws commands, command substitutions, heredoc body detection (both
+executed and non-executed), `bash -c` inline detection, `aws s3 cp` direction
+detection, and global-flag parsing.
 
 ## Extending the hook
 

@@ -1,0 +1,16 @@
+{
+  "description": "Block AWS CLI write/mutation operations — all infrastructure changes must go through IaC",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run ${CLAUDE_PLUGIN_ROOT}/hooks/aws_guard.py"
+          }
+        ]
+      }
+    ]
+  }
+}

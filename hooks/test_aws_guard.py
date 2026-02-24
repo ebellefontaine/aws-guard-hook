@@ -347,5 +347,168 @@ class TestInvocationParsing(unittest.TestCase):
         self.assertIsInstance(ok, bool)
 
 
+class TestHeredocFalsePositivePrevention(unittest.TestCase):
+    """
+    Commands that write heredoc content containing 'aws' to a file or pipe —
+    the aws text is not being executed, so these must be ALLOWED.
+    """
+
+    def _allow(self, cmd: str) -> None:
+        allowed, blocked = evaluate_command(cmd)
+        self.assertTrue(
+            allowed,
+            f"Expected ALLOW (aws only in heredoc body) but got BLOCK for: {cmd!r}  blocked_inv={blocked!r}",
+        )
+
+    def test_cat_heredoc_to_file(self):
+        self._allow(
+            "cat > /tmp/deploy.sh <<EOF\naws ec2 run-instances --image-id ami-12345\nEOF"
+        )
+
+    def test_tee_heredoc_with_aws(self):
+        self._allow(
+            "tee /tmp/script.sh <<'SCRIPT'\naws s3 rm s3://bucket/file.txt\nSCRIPT"
+        )
+
+    def test_echo_heredoc_to_file(self):
+        self._allow(
+            "cat <<EOF > /tmp/Makefile\ndeploy:\n\taws cloudformation deploy ...\nEOF"
+        )
+
+    def test_heredoc_with_read_only_aws_in_body(self):
+        # Heredoc written to file — even a read-only aws command in the body
+        # should be allowed (it's not being executed here).
+        self._allow(
+            "cat > README.txt <<END\nRun: aws ec2 describe-instances\nEND"
+        )
+
+
+class TestHeredocShellExecution(unittest.TestCase):
+    """
+    Commands that pass a heredoc body to a shell interpreter for execution —
+    any write aws invocation inside the body must be BLOCKED.
+    """
+
+    def _allow(self, cmd: str) -> None:
+        allowed, blocked = evaluate_command(cmd)
+        self.assertTrue(allowed, f"Expected ALLOW but got BLOCK for: {cmd!r}")
+
+    def _block(self, cmd: str) -> None:
+        allowed, blocked = evaluate_command(cmd)
+        self.assertFalse(allowed, f"Expected BLOCK but got ALLOW for: {cmd!r}")
+
+    # --- write operations inside shell heredoc → must be blocked ---
+    def test_bash_heredoc_run_instances(self):
+        self._block(
+            "bash <<EOF\naws ec2 run-instances --image-id ami-12345 --instance-type t3.micro\nEOF"
+        )
+
+    def test_sh_heredoc_s3_rm(self):
+        self._block("sh <<'EOF'\naws s3 rm s3://my-bucket/file.txt\nEOF")
+
+    def test_bash_heredoc_create_stack(self):
+        self._block(
+            "bash <<SCRIPT\naws cloudformation create-stack --stack-name test --template-body file://t.yaml\nSCRIPT"
+        )
+
+    def test_bash_heredoc_delete_function(self):
+        self._block("bash <<EOF\naws lambda delete-function --function-name my-fn\nEOF")
+
+    # --- read-only aws commands inside shell heredoc → must be allowed ---
+    def test_bash_heredoc_describe_instances(self):
+        self._allow(
+            "bash <<EOF\naws ec2 describe-instances --filters Name=instance-state-name,Values=running\nEOF"
+        )
+
+    def test_sh_heredoc_list_buckets(self):
+        self._allow("sh <<EOF\naws s3api list-buckets\nEOF")
+
+
+class TestBashCInlineExecution(unittest.TestCase):
+    """
+    Commands using bash -c / sh -c with an inline aws invocation.
+    Write operations must be BLOCKED; read-only must be ALLOWED.
+    """
+
+    def _allow(self, cmd: str) -> None:
+        allowed, blocked = evaluate_command(cmd)
+        self.assertTrue(allowed, f"Expected ALLOW but got BLOCK for: {cmd!r}")
+
+    def _block(self, cmd: str) -> None:
+        allowed, blocked = evaluate_command(cmd)
+        self.assertFalse(allowed, f"Expected BLOCK but got ALLOW for: {cmd!r}")
+
+    # --- write operations → must be blocked ---
+    def test_bash_c_run_instances(self):
+        self._block("bash -c 'aws ec2 run-instances --image-id ami-12345 --instance-type t3.micro'")
+
+    def test_sh_c_s3_rm(self):
+        self._block("sh -c 'aws s3 rm s3://my-bucket/important.txt'")
+
+    def test_bash_c_double_quoted_write(self):
+        self._block('bash -c "aws lambda delete-function --function-name my-fn"')
+
+    def test_bash_flags_before_c(self):
+        self._block("bash -x -e -c 'aws ec2 terminate-instances --instance-ids i-abc'")
+
+    def test_sh_c_iam_create_user(self):
+        self._block("sh -c 'aws iam create-user --user-name alice'")
+
+    # --- read-only operations → must be allowed ---
+    def test_bash_c_describe(self):
+        self._allow("bash -c 'aws ec2 describe-instances'")
+
+    def test_sh_c_list_buckets(self):
+        self._allow("sh -c 'aws s3api list-buckets'")
+
+    def test_bash_c_sts(self):
+        self._allow("bash -c 'aws sts get-caller-identity'")
+
+
+class TestPipedToAws(unittest.TestCase):
+    """
+    Explicit tests for commands where aws is the *receiver* of a pipe.
+    These are already covered implicitly but deserve their own class.
+    """
+
+    def _allow(self, cmd: str) -> None:
+        allowed, blocked = evaluate_command(cmd)
+        self.assertTrue(allowed, f"Expected ALLOW but got BLOCK for: {cmd!r}")
+
+    def _block(self, cmd: str) -> None:
+        allowed, blocked = evaluate_command(cmd)
+        self.assertFalse(allowed, f"Expected BLOCK but got ALLOW for: {cmd!r}")
+
+    def test_cat_pipe_to_s3api_put_blocked(self):
+        self._block(
+            "cat data.json | aws s3api put-object --bucket my-bucket --key data.json --body -"
+        )
+
+    def test_echo_pipe_to_sqs_send_blocked(self):
+        self._block(
+            'echo \'{"message":"hello"}\' | aws sqs send-message --queue-url https://sqs.amazonaws.com/123/Q --message-body -'
+        )
+
+    def test_cat_pipe_to_describe_allowed(self):
+        # Piping to a read-only aws command is fine.
+        self._allow("cat ids.txt | aws ec2 describe-instances")
+
+    def test_heredoc_pipe_to_s3api_put_blocked(self):
+        self._block(
+            "cat <<EOF | aws s3api put-object --bucket b --key k --body -\n{}\nEOF"
+        )
+
+    def test_heredoc_pipe_to_get_allowed(self):
+        self._allow("cat <<EOF | aws ec2 describe-instances\ni-abc\nEOF")
+
+    def test_aws_pipe_to_jq_read_allowed(self):
+        # aws on LEFT side of pipe doing a read — allowed.
+        self._allow("aws ec2 describe-instances | jq '.Reservations[]'")
+
+    def test_aws_write_pipe_to_jq_blocked(self):
+        # aws on LEFT side of pipe doing a WRITE — still blocked.
+        self._block("aws ec2 run-instances --image-id ami-12345 --instance-type t3.micro | jq .")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

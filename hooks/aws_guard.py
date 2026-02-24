@@ -1,4 +1,7 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.8"
+# ///
 """
 AWS Guard Hook for Claude Code
 
@@ -76,6 +79,11 @@ AWS_GLOBAL_VALUE_FLAGS = frozenset({
     "--cli-binary-format",
 })
 
+# Shell interpreter names whose heredoc bodies and -c arguments we inspect.
+# The negative lookbehind (?<![.\w]) prevents matching file extensions like
+# ".sh" in "deploy.sh" or words like "mybash".
+_SHELL_RE = r"(?<![.\w])(?:bash|sh|zsh|dash|ksh)"
+
 BLOCK_MESSAGE_TEMPLATE = """\
 [AWS Guard] Command blocked: this operation would perform a write/mutation on AWS infrastructure.
 
@@ -89,6 +97,36 @@ Blocked command: {cmd}"""
 
 
 # ---------------------------------------------------------------------------
+# Heredoc utilities
+# ---------------------------------------------------------------------------
+
+# Matches a heredoc block: <<[-]?[optional-quote]MARKER[optional-quote]\n BODY \nMARKER
+# Group 1: opening (e.g. "<<"), Group 2: marker word, Group 3: rest of opening line + \n
+# Group 4 (implicit via .*?): body, Group 5: closing \nMARKER line
+_HEREDOC_RE = re.compile(
+    r"(<<-?\s*['\"]?)(\w+)(['\"]?[^\n]*\n)"  # opening: <<[-]['"]?MARKER['"]?[rest-of-line]\n
+    r".*?"                                     # body (non-greedy, DOTALL)
+    r"(\n\2[ \t]*(?:\n|$))",                  # closing: \nMARKER (own line)
+    re.DOTALL,
+)
+
+
+def strip_heredoc_bodies(command: str) -> str:
+    """
+    Replace heredoc body text with a placeholder, leaving the markers intact.
+
+    Used to distinguish 'aws' that appears in non-executed heredoc text
+    (e.g. writing a shell script) from 'aws' that is actually invoked.
+
+    Example:
+        cat > deploy.sh <<EOF        ← kept
+        aws ec2 run-instances ...    ← replaced with <heredoc>
+        EOF                          ← kept
+    """
+    return _HEREDOC_RE.sub(r"\1\2\3<heredoc>\4", command)
+
+
+# ---------------------------------------------------------------------------
 # Extraction helpers
 # ---------------------------------------------------------------------------
 
@@ -97,31 +135,88 @@ def extract_aws_invocations(command: str) -> List[str]:
     Return every distinct aws CLI invocation found inside *command*.
 
     Handles:
-    - Simple commands:        aws ec2 describe-instances
-    - Compound commands:      aws ec2 describe ... && aws ec2 run-instances ...
-    - Pipeline segments:      aws ec2 describe ... | jq .
-    - Env-var prefixes:       AWS_PROFILE=prod aws ec2 describe-instances
-    - Command substitutions:  $(aws sts get-caller-identity)
-    - Backtick substitutions: `aws sts get-caller-identity`
+    - Simple commands:              aws ec2 describe-instances
+    - Piped-to-aws:                 cat data.json | aws s3api put-object ...
+    - Compound commands:            aws ec2 describe ... && aws ec2 run-instances ...
+    - Env-var prefixes:             AWS_PROFILE=prod aws ec2 describe-instances
+    - Shell redirections / heredoc: aws sqs send-message --body - <<EOF ...
+    - Command substitutions:        $(aws sts get-caller-identity)
+    - Backtick substitutions:       `aws sts get-caller-identity`
     """
     found: List[str] = []
 
     # 1. Split on shell operators and examine each segment.
-    segments = re.split(r'\s*(?:&&|\|\||;|\|)\s*', command)
+    #    This naturally handles both "aws ... | cmd" and "cmd | aws ..."
+    #    because we check every segment, not just the first.
+    segments = re.split(r"\s*(?:&&|\|\||;|\|)\s*", command)
     for seg in segments:
         seg = seg.strip()
         # Strip leading VAR=value assignments (e.g. AWS_PROFILE=prod aws ...)
-        stripped = re.sub(r'^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*', '', seg)
-        if re.match(r'aws\s', stripped):
+        stripped = re.sub(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*", "", seg)
+        if re.match(r"aws\s", stripped):
             found.append(stripped)
 
     # 2. Extract $(...) command substitutions.
-    for m in re.finditer(r'\$\(\s*(aws\s[^)]+)\)', command):
+    for m in re.finditer(r"\$\(\s*(aws\s[^)]+)\)", command):
         found.append(m.group(1).strip())
 
     # 3. Extract backtick substitutions.
-    for m in re.finditer(r'`\s*(aws\s[^`]+)`', command):
+    for m in re.finditer(r"`\s*(aws\s[^`]+)`", command):
         found.append(m.group(1).strip())
+
+    return found
+
+
+def extract_heredoc_shell_aws(command: str) -> List[str]:
+    """
+    Extract aws invocations from heredoc bodies passed to a shell interpreter.
+
+    Catches patterns like:
+
+        bash <<EOF
+        aws ec2 run-instances --image-id ami-... --instance-type t3.micro
+        EOF
+
+        sh <<'SCRIPT'
+        aws s3 rm s3://my-bucket/file.txt
+        SCRIPT
+    """
+    found: List[str] = []
+    pattern = re.compile(
+        r"\b" + _SHELL_RE + r"\b"       # bash / sh / zsh / dash / ksh
+        r"[^\n]*"                        # optional flags on same line
+        r"<<-?\s*['\"]?(\w+)['\"]?"     # <<[-][']MARKER[']
+        r"[^\n]*\n"                      # rest of opening line (e.g. redirects), then newline
+        r"(.*?)"                         # body (captured)
+        r"\n\1[ \t]*(?:\n|$)",          # closing MARKER on its own line
+        re.DOTALL,
+    )
+    for m in pattern.finditer(command):
+        body = m.group(2)
+        found.extend(extract_aws_invocations(body))
+    return found
+
+
+def extract_bash_c_aws(command: str) -> List[str]:
+    """
+    Extract aws invocations from shell -c '...' / shell -c "..." inline strings.
+
+    Catches patterns like:
+
+        bash -c 'aws ec2 run-instances ...'
+        sh -c "aws s3 rm s3://bucket/file"
+        bash -x -e -c 'aws lambda invoke ...'
+    """
+    found: List[str] = []
+    prefix = r"\b" + _SHELL_RE + r"\b\s+(?:-\w+\s+)*-c\s+"
+
+    # Single-quoted: content cannot contain literal single quotes in POSIX shell
+    for m in re.finditer(prefix + r"'([^']*)'", command):
+        found.extend(extract_aws_invocations(m.group(1)))
+
+    # Double-quoted: allow escaped characters inside
+    for m in re.finditer(prefix + r'"((?:[^"\\]|\\.)*)"', command):
+        found.extend(extract_aws_invocations(m.group(1)))
 
     return found
 
@@ -129,6 +224,10 @@ def extract_aws_invocations(command: str) -> List[str]:
 def parse_aws_positional(cmd_str: str) -> Tuple[Optional[str], Optional[str]]:
     """
     Tokenise an 'aws ...' string and return (service, subcommand).
+
+    Shell redirections (<<EOF, >, >>) are not POSIX metacharacters in the
+    default shlex mode, so they tokenise as ordinary words and are safely
+    ignored because parse_aws_positional stops after finding two positionals.
 
     Returns (None, None) when tokenisation fails or 'aws' is not the first
     token.
@@ -225,7 +324,7 @@ def is_invocation_allowed(aws_cmd: str) -> Tuple[bool, str]:
         if subcommand == "cp":
             if is_s3_cp_download(aws_cmd):
                 return True, ""
-            return False, f"aws s3 cp is only permitted for downloads (s3:// → local)"
+            return False, "aws s3 cp is only permitted for downloads (s3:// → local)"
         # mv, rm, sync, mb, rb, website, … are all writes
         return False, f"aws s3 {subcommand!r} is a write/mutation operation"
 
@@ -250,13 +349,32 @@ def evaluate_command(command: str) -> Tuple[bool, str]:
     Returns (allowed, blocked_invocation_string).
     """
     # Fast path — no 'aws' in the command at all.
-    if not re.search(r'\baws\b', command):
+    if not re.search(r"\baws\b", command):
         return True, ""
 
-    invocations = extract_aws_invocations(command)
+    invocations: List[str] = []
+
+    # 1. Direct invocations, pipelines (both directions), compound commands,
+    #    command substitutions, and heredoc-redirected aws commands.
+    invocations.extend(extract_aws_invocations(command))
+
+    # 2. aws commands inside heredoc bodies passed to a shell interpreter
+    #    (e.g. bash <<EOF\naws ec2 run-instances...\nEOF).
+    invocations.extend(extract_heredoc_shell_aws(command))
+
+    # 3. aws commands inside shell -c '...' inline strings
+    #    (e.g. bash -c 'aws ec2 run-instances ...').
+    invocations.extend(extract_bash_c_aws(command))
 
     if not invocations:
-        # 'aws' is present but we couldn't extract any invocation — be safe.
+        # 'aws' is somewhere in the string but we could not identify an
+        # executed invocation.  Before blocking conservatively, check whether
+        # 'aws' appears ONLY inside non-executed heredoc bodies (e.g. a script
+        # being written to disk with cat/tee and a heredoc).
+        if not re.search(r"\baws\b", strip_heredoc_bodies(command)):
+            return True, ""  # 'aws' only in heredoc text, not executed
+
+        # 'aws' is present outside heredoc text but unextractable — block.
         return False, command.strip()
 
     for inv in invocations:

@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 hooks/aws_guard.py"
+            "command": "uv run hooks/aws_guard.py"
           }
         ]
       }

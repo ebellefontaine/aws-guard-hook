@@ -1,0 +1,8 @@
+{
+  "name": "aws-guard",
+  "description": "Blocks AWS CLI write/mutation operations so all infrastructure changes go through IaC. Only read-only commands (get-, list-, describe-, etc.) are permitted.",
+  "version": "1.0.0",
+  "author": {
+    "name": "aws-guard-hook"
+  }
+}
