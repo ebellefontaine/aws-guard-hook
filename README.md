@@ -61,7 +61,7 @@ This repo ships as a Claude Code plugin. Install it via the plugin system:
 
 ```shell
 # Add a marketplace pointing at this repo (one-time setup)
-/plugin marketplace add <repo-url>
+/plugin marketplace add ebellefontaine/aws-guard-hook
 
 # Install the plugin — hook is registered automatically
 /plugin install aws-guard
