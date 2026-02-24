@@ -4,5 +4,10 @@
   "version": "1.0.0",
   "author": {
     "name": "Eric Bellefontaine"
-  }
+  },
+  "repository": "https://github.com/ebellefontaine/aws-guard-hook",
+  "license": "MIT",
+  "keywords": ["aws", "security", "hooks", "iac", "guard", "read-only"],
+  "hooks": "hooks/hooks.json",
+  "commands": ".claude/commands/"
 }
