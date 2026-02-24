@@ -124,6 +124,52 @@ Use `python3 hooks/aws_guard.py` if `uv` is not available.
    [Claude Code hooks documentation](https://docs.anthropic.com/en/docs/claude-code/hooks)
    if the schema has changed since this was written.
 
+## AWS Read-Only Skill (`/aws-readonly`)
+
+This repo also ships a **Claude Code skill** that gives Claude proactive
+guidance — before it ever tries a write command — rather than relying solely
+on the hook to block it after the fact.
+
+### What the skill does
+
+Invoking `/aws-readonly` loads a system-level prompt that instructs Claude to:
+
+- Use only read-only AWS CLI commands (`describe-*`, `list-*`, `get-*`, etc.)
+  for inspection and discovery.
+- Avoid write/mutation CLI commands entirely (`create-*`, `put-*`, `delete-*`,
+  `update-*`, etc.).
+- Express any desired infrastructure change by **editing IaC source files**
+  (Terraform `.tf`, CDK app, CloudFormation template, Pulumi program, or SAM
+  `template.yaml`) rather than running the AWS CLI directly or writing
+  one-off shell scripts.
+- Follow an inspect → plan → edit IaC → review (`terraform plan` / `cdk diff`)
+  → apply workflow.
+
+The skill explains **why** this matters (drift, audit trail, rollback safety)
+so Claude can reason about it and explain the constraint to you if asked.
+
+### How to use the skill
+
+The skill file lives at `.claude/commands/aws-readonly.md`.  Load it at the
+start of any session where you want Claude to operate in read-only/IaC mode:
+
+```
+/aws-readonly
+```
+
+Claude Code reads the markdown file and treats its contents as active
+guidance for the rest of the session.
+
+### Skill vs. hook — two complementary layers
+
+| Layer | When it acts | What it does |
+|---|---|---|
+| **`/aws-readonly` skill** | Proactively, at session start | Guides Claude toward IaC; prevents write attempts before they happen |
+| **`aws_guard.py` hook** | Reactively, before every Bash call | Hard-blocks any write command that slips through; no override |
+
+Using both layers together gives you defence-in-depth: the skill shapes
+Claude's intent; the hook enforces the policy as a hard safety net.
+
 ## Block message example
 
 When a write command is intercepted Claude sees:

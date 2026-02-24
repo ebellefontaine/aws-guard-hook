@@ -510,5 +510,41 @@ class TestPipedToAws(unittest.TestCase):
         self._block("aws ec2 run-instances --image-id ami-12345 --instance-type t3.micro | jq .")
 
 
+class TestAwsInFilenamesFalsePositive(unittest.TestCase):
+    """
+    Shell commands that contain 'aws' only as part of a file or directory name
+    (e.g. aws-readonly.md, aws_guard.py) must NOT be blocked — there is no
+    actual AWS CLI invocation in those commands.
+    """
+
+    def _allow(self, cmd: str) -> None:
+        allowed, blocked = evaluate_command(cmd)
+        self.assertTrue(
+            allowed,
+            f"Expected ALLOW (aws only in filename) but got BLOCK for: {cmd!r}  blocked_inv={blocked!r}",
+        )
+
+    def test_git_add_aws_prefixed_file(self):
+        self._allow("git add .claude/commands/aws-readonly.md")
+
+    def test_git_add_aws_guard_script(self):
+        self._allow("git add hooks/aws_guard.py")
+
+    def test_cat_aws_prefixed_file(self):
+        self._allow("cat docs/aws-readonly.md")
+
+    def test_cp_aws_prefixed_file(self):
+        self._allow("cp hooks/aws_guard.py /tmp/aws_guard_backup.py")
+
+    def test_git_commit_message_mentioning_aws(self):
+        self._allow('git commit -m "add aws-readonly skill"')
+
+    def test_ls_aws_directory(self):
+        self._allow("ls .claude/commands/aws-readonly.md")
+
+    def test_rm_aws_log_file(self):
+        self._allow("rm /var/log/aws-cli.log")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

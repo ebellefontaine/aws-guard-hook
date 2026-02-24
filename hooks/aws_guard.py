@@ -348,8 +348,11 @@ def evaluate_command(command: str) -> Tuple[bool, str]:
 
     Returns (allowed, blocked_invocation_string).
     """
-    # Fast path — no 'aws' in the command at all.
-    if not re.search(r"\baws\b", command):
+    # Fast path — no 'aws' invocation in the command at all.
+    # Require 'aws' to be followed by whitespace or a shell operator so that
+    # file/path names containing 'aws' (e.g. aws-readonly.md, aws_guard.py)
+    # don't trigger the full extraction pipeline.
+    if not re.search(r"\baws(?=[\s;|&(])", command):
         return True, ""
 
     invocations: List[str] = []
@@ -371,7 +374,7 @@ def evaluate_command(command: str) -> Tuple[bool, str]:
         # executed invocation.  Before blocking conservatively, check whether
         # 'aws' appears ONLY inside non-executed heredoc bodies (e.g. a script
         # being written to disk with cat/tee and a heredoc).
-        if not re.search(r"\baws\b", strip_heredoc_bodies(command)):
+        if not re.search(r"\baws(?=[\s;|&(])", strip_heredoc_bodies(command)):
             return True, ""  # 'aws' only in heredoc text, not executed
 
         # 'aws' is present outside heredoc text but unextractable — block.
