@@ -1,11 +1,10 @@
 {
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "aws-guard-hook",
+  "version": "1.0.0",
+  "description": "AWS CLI guard hooks and read-only skills for Claude Code",
   "owner": {
     "name": "Eric Bellefontaine"
-  },
-  "metadata": {
-    "description": "AWS CLI guard hooks and read-only skills for Claude Code",
-    "version": "1.0.0"
   },
   "plugins": [
     {
