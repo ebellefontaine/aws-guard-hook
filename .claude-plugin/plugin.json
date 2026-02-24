@@ -8,6 +8,6 @@
   "repository": "https://github.com/ebellefontaine/aws-guard-hook",
   "license": "MIT",
   "keywords": ["aws", "security", "hooks", "iac", "guard", "read-only"],
-  "hooks": "hooks/hooks.json",
-  "commands": ".claude/commands/"
+  "hooks": "./hooks/hooks.json",
+  "commands": "./.claude/commands/"
 }

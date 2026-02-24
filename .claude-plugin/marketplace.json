@@ -1,0 +1,26 @@
+{
+  "name": "aws-guard-hook",
+  "owner": {
+    "name": "Eric Bellefontaine"
+  },
+  "metadata": {
+    "description": "AWS CLI guard hooks and read-only skills for Claude Code",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "aws-guard",
+      "source": ".",
+      "description": "Blocks AWS CLI write/mutation operations so all infrastructure changes go through IaC. Only read-only commands (get-, list-, describe-, etc.) are permitted.",
+      "version": "1.0.0",
+      "author": {
+        "name": "Eric Bellefontaine"
+      },
+      "repository": "https://github.com/ebellefontaine/aws-guard-hook",
+      "license": "MIT",
+      "keywords": ["aws", "security", "hooks", "iac", "guard", "read-only"],
+      "category": "security",
+      "tags": ["aws", "guard", "read-only", "iac", "infrastructure"]
+    }
+  ]
+}
